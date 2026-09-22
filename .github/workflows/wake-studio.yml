@@ -1,11 +1,14 @@
 name: wake-velyx-studio
 
 # Scheduled wake (hourly, offset from :00 to dodge GitHub's cron rush) +
-# on-demand wake via "Run workflow" button or `gh workflow run`.
+# on-demand wake via "Run workflow" button or `gh workflow run` +
+# Telegram-triggered wake via repository_dispatch from the Cloudflare Worker.
 on:
   schedule:
     - cron: "23 * * * *"
   workflow_dispatch: {}
+  repository_dispatch:
+    types: [wake-velyx]
 
 concurrency:
   group: wake-studio

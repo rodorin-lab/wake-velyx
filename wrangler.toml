@@ -1,0 +1,9 @@
+name = "wake-velyx"
+main = "worker/wake-worker.js"
+compatibility_date = "2026-09-01"
+
+# Secrets are set via the Cloudflare dashboard (or `wrangler secret put`):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, WAKE_DISPATCH_TOKEN
+# Optional var (defaults to the studio owner's ID inside the worker):
+# [vars]
+# ALLOWED_USER_IDS = "5180295927"

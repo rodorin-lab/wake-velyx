@@ -1,36 +1,73 @@
 # wake-velyx
 
-GitHub Actions による Lightning Studio (velyx-hermes) の定期 wake + オンデマンド wake。
+Lightning Studio (velyx-hermes) の完全な wake チェーン — Telegram からでも、時間ででも、手動でも。
 
-## 仕組み
+## 3つのトリガー（すべて同じ冪等 wake に接続）
 
-- `scripts/wake_studio.py` — 冪等な wake スクリプト。Studio が Stopped のときだけ start() を発行し、Running なら no-op、過渡状態 (Pending/Stopping) なら次サイクルに任せて exit 0。
-- `.github/workflows/wake-studio.yml` — 2 つのトリガーで同じスクリプトを実行:
-  - **schedule** (`23 * * * *`): 毎時23分に定期 wake
-  - **workflow_dispatch**: GitHub UI の「Run workflow」ボタンまたは `gh workflow run` でオンデマンド wake
-- `concurrency: group=wake-studio` で両トリガーを直列化し干渉防止。
+| トリガー | 経路 | 用途 |
+|---|---|---|
+| 定期 wake | `schedule: 23 * * * *` | 毎時23分。バックストップ（Webhook受信側が落ちても復帰保証） |
+| オンデマンド | `workflow_dispatch` | GitHub UI ボタン / `gh workflow run` |
+| Telegram | Worker → `repository_dispatch` | sleep中のTelegramメッセージから即時wake |
 
-Studio が wake されると、Studio 内部の on_start.sh → systemd unit 復元 → Hermes gateway 起動のチェーンが自動で走る（Studio 側は無変更）。
+すべて `concurrency: wake-studio` で直列化 → 干渉なし。
 
-## セットアップ手順
+## Telegram wake の仕組み（ネイティブ再生方式）
 
-1. このリポジトリを GitHub に push（public 推奨: 無料枠無制限＆ scheduled workflow が 60 日ルールの影響を受けにくい運用）
-2. lightning.ai の Global Settings → Keys → 「Login via CLI」から `LIGHTNING_USER_ID` と `LIGHTNING_API_KEY` を取得
-3. repo の Settings → Secrets and variables → Actions → New repository secret で以下を登録:
-   - `LIGHTNING_USER_ID`
-   - `LIGHTNING_API_KEY`
-4. Actions タブで "wake-velyx-studio" workflow の有効化を確認（初回 push 後に自動有効）
+```
+Studio sleep時:
+  on_stop.sh → Telegram setWebhook(Worker URL, secret_token)   ← "arm"
+  Telegram → Worker (受信):
+    1. secret_token 検証 (403 otherwise)
+    2. repository_dispatch → wake workflow 起動
+    3. ack返信: 「起こしてる、2〜5分」
+    4. HTTP 503 を返す → Telegram がリトライ継続 → update は pending のまま
+Studio 復帰時:
+  on_start.sh → systemd → Hermes gateway 起動
+  gateway → deleteWebhook(drop_pending_updates=False)   ← Telegram adapter 組込済み
+  → pending update が getUpdates に解放 → Velyx が元メッセージをネイティブ処理
+```
 
-## 使い方
+メッセージ本文はGitHubにもWorkerログにも一切保存されない（privacy）。
+Workerは update_id ベースの Cache API でリトライ配信を重複排除。
 
-- 定期: 毎時23分に自動実行（何もしなくてよい）
-- オンデマンド: Actions → wake-velyx-studio → Run workflow ボタン、または:
-  ```bash
-  gh workflow run wake-studio.yml
-  ```
+## Cloudflare Worker セットアップ（一度だけ）
+
+1. https://dash.cloudflare.com → Workers & Pages → Create Worker
+2. `worker/wake-worker.js` のコードを貼り付け → Deploy
+3. Worker の URL (`https://wake-velyx.<account>.workers.dev`) をメモ
+4. Settings → Variables and Secrets → 3つの Secret を登録:
+   - `TELEGRAM_BOT_TOKEN` — Hermes が使っている bot token と同一
+   - `TELEGRAM_WEBHOOK_SECRET` — Studio の `~/.hermes/.env` の `TELEGRAM_WEBHOOK_SECRET` と同じ値
+   - `WAKE_DISPATCH_TOKEN` — GitHub fine-grained PAT (rodorin-lab/wake-velyx, Actions: Read and write)
+5. オプション `ALLOWED_USER_IDS` (var) — 未設定ならWorker内のデフォルト（kenyuu の user ID）
+
+## Studio 側 (.env)
+
+```
+TELEGRAM_BOT_TOKEN=...          # 既存
+TELEGRAM_WEBHOOK_SECRET=...     # on_stop.sh が setWebhook の secret_token に使う
+TELEGRAM_WAKE_WORKER_URL=...    # Worker の URL
+```
+
+`on_stop.sh` (sleepのたび) と `on_start.sh` (startのたび) は Lightning 標準フックで自動実行。
+
+## 手動テスト
+
+```bash
+# Worker が生きているか
+curl https://wake-velyx.<account>.workers.dev
+
+# wake workflow を手動発火
+gh workflow run wake-studio.yml --repo rodorin-lab/wake-velyx
+
+# webhook の状態確認 (Studio 内から)
+source ~/.hermes/.env
+curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo" | python3 -m json.tool
+```
 
 ## 注意
 
-- 60 日間 repo にコミットがないと GitHub が schedule を自動無効化する（メール通知あり）。disable されたら「Enable workflow」で戻す。
-- Studio の auto-sleep は Free プランで 10 分固定。定期 wake の間隔を縮めると Telegram 応答の最大遅延が縮む（public repo なら無料で頻度アップ可）。
-- このリポジトリには秘密情報は含まれない（API キーは GitHub Secrets のみ）。
+- 60日間コミットなしで scheduled workflow が disable される（メール通知 → Enable workflow で戻す）
+- Free プランの auto-sleep (10分) は継続。定期 wake を上げれば最大応答遅延が縮む
+- この repo には秘密情報ゼロ（secrets は GitHub Actions secrets と CF Worker secrets のみ）
