@@ -60,3 +60,65 @@ mkdir -p "$HERMES_LOG_DIR"
     /usr/bin/systemctl is-active hermes-gateway.service
     echo "=== hermes-gateway fail-safe finished ==="
 } >> "$HERMES_LOG_DIR/hermes-fail-safe.log" 2>&1
+
+# ============================================================================
+# Tailscale fail-safe (RODORIN LABS / 2026-09-22)
+# ----------------------------------------------------------------------------
+# Same pattern as the Hermes gateway fail-safe above, but fully independent:
+# runs in its own subshell, never exits the script early, and never touches
+# the Hermes block's state.
+#
+# Template: .lightning_studio/tailscaled.service.template
+# Unit:     /etc/systemd/system/tailscaled.service
+# State:    .lightning_studio/tailscale/state   (persistent home — survives
+#           snapshots, so the node identity and login survive reboots)
+#
+# /dev/net/tun is recreated if the snapshot dropped it (kernel module is
+# always present; only the device node can go missing).
+# ============================================================================
+
+TS_UNIT_SRC="/teamspace/studios/this_studio/.lightning_studio/tailscaled.service.template"
+TS_UNIT_DST="/etc/systemd/system/tailscaled.service"
+TS_BIN="/teamspace/studios/this_studio/.lightning_studio/tailscale/bin/tailscale"
+TS_LOG_DIR="/teamspace/studios/this_studio/.lightning_studio/logs"
+
+(
+    echo "=== tailscale fail-safe started at $(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+
+    if [ ! -f "$TS_UNIT_SRC" ] || [ ! -x "$TS_BIN" ]; then
+        echo "WARN: tailscale template or binary missing — skipping Tailscale setup."
+        echo "=== tailscale fail-safe finished (skipped) ==="
+        exit 0
+    fi
+
+    # Ensure /dev/net/tun exists (harmless if present, fixes missing node).
+    if [ ! -c /dev/net/tun ]; then
+        echo "/dev/net/tun missing — recreating device node."
+        /usr/bin/sudo -n /usr/bin/mkdir -p /dev/net
+        /usr/bin/sudo -n /usr/bin/mknod /dev/net/tun c 10 200
+        /usr/bin/sudo -n /usr/bin/chmod 666 /dev/net/tun
+    fi
+
+    # Re-install the unit only when missing or different from the template.
+    if [ ! -f "$TS_UNIT_DST" ] || ! /usr/bin/cmp -s "$TS_UNIT_SRC" "$TS_UNIT_DST"; then
+        echo "tailscaled unit missing or outdated — (re)installing from template."
+        /usr/bin/sudo -n /usr/bin/install -m 644 -o root -g root \
+            "$TS_UNIT_SRC" "$TS_UNIT_DST"
+        /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
+        echo "tailscaled unit installed and daemon reloaded."
+    else
+        echo "tailscaled unit already installed and identical to template — skipping regeneration."
+    fi
+
+    # Enable (idempotent) and start (idempotent: no-op if already running).
+    /usr/bin/sudo -n /usr/bin/systemctl enable tailscaled.service
+    /usr/bin/sudo -n /usr/bin/systemctl start tailscaled.service
+
+    /usr/bin/systemctl is-active tailscaled.service
+
+    # Report login state. With persistent state dir the node auto-logins on
+    # resume; "Logged out." here would mean the state was lost (should never
+    # happen) and would need a one-time manual `tailscale up`.
+    "$TS_BIN" status --peers=false 2>&1 | head -2 || true
+    echo "=== tailscale fail-safe finished ==="
+) >> "$TS_LOG_DIR/tailscale-fail-safe.log" 2>&1 || true
