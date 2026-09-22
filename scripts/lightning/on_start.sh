@@ -122,3 +122,39 @@ TS_LOG_DIR="/teamspace/studios/this_studio/.lightning_studio/logs"
     "$TS_BIN" status --peers=false 2>&1 | head -2 || true
     echo "=== tailscale fail-safe finished ==="
 ) >> "$TS_LOG_DIR/tailscale-fail-safe.log" 2>&1 || true
+
+# ============================================================================
+# SSH keys fail-safe (RODORIN LABS / 2026-09-22)
+# ----------------------------------------------------------------------------
+# ~/.ssh is listed in ~/.lightningignore, so keys placed there vanish on
+# snapshot resume. The persistent copies in .lightning_studio/ssh/ are restored
+# into ~/.ssh on every Studio start. chmod 600 enforced; idempotent.
+# ============================================================================
+
+SSH_KEY_SRC="/teamspace/studios/this_studio/.lightning_studio/ssh"
+SSH_KEY_DST="/teamspace/studios/this_studio/.ssh"
+
+(
+    echo "=== ssh-keys fail-safe started at $(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    if [ ! -d "$SSH_KEY_SRC" ]; then
+        echo "WARN: $SSH_KEY_SRC missing — nothing to restore."
+        exit 0
+    fi
+    /usr/bin/mkdir -p "$SSH_KEY_DST"
+    /usr/bin/chmod 700 "$SSH_KEY_DST"
+    for f in "$SSH_KEY_SRC"/*; do
+        [ -f "$f" ] || continue
+        base=$(/usr/bin/basename "$f")
+        if [ ! -f "$SSH_KEY_DST/$base" ] || ! /usr/bin/cmp -s "$f" "$SSH_KEY_DST/$base"; then
+            /usr/bin/cp "$f" "$SSH_KEY_DST/$base"
+            case "$base" in
+                *.pub) /usr/bin/chmod 644 "$SSH_KEY_DST/$base" ;;
+                *)     /usr/bin/chmod 600 "$SSH_KEY_DST/$base" ;;
+            esac
+            echo "restored: $base"
+        else
+            echo "up-to-date: $base"
+        fi
+    done
+    echo "=== ssh-keys fail-safe finished ==="
+) >> "/teamspace/studios/this_studio/.lightning_studio/logs/ssh-keys-fail-safe.log" 2>&1 || true
